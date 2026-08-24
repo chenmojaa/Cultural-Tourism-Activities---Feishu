@@ -5,7 +5,7 @@ import httpx
 
 def al_model_test():
     # _base_url="https://vllmqwen3.dy.takin.cc/v1"
-    # _base_url="http://10.0.0.253:8000/v1"
+    # _base_url="http://bge-host:8000/v1"
     # _base_url="https://666666.dy.takin.cc/v1"
     # _base_url = "https://777777.dy.takin.cc/v1"
     _base_url = "http://36.7.147.231:8000/v1"
@@ -35,7 +35,7 @@ def al_model_test():
 
 async def al_model_test22():
     # _base_url="https://vllmqwen3.dy.takin.cc/v1"
-    # _base_url="http://10.0.0.253:8000/v1"
+    # _base_url="http://bge-host:8000/v1"
     # _base_url="https://666666.dy.takin.cc/v1"
     _base_url = "https://777777.dy.takin.cc/v1/chat/completions"
 
@@ -57,7 +57,7 @@ async def al_model_test22():
 
 def victor_model_test():
     _base_url = "http://36.7.147.231:8002/v1/score"
-    # _base_url = "http://10.0.0.253:8002/v1/score"
+    # _base_url = "http://bge-host:8002/v1/score"
     # 相似度得分
     response = requests.post(
         _base_url,

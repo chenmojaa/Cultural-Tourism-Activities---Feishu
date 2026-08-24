@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """config.py 的占位模板。把这份复制成 config.py 后填入真实值。
 
 提示:

@@ -58,6 +58,8 @@ SUMMARY_PROMPT = """⚠️ 必须先调用 web_search 工具拿到关于【{case
 0. **二次过滤(必查)**:先判断【{case_name}】搜出来的实际内容是什么:
    - 若是**已实际开展**的文旅活动(已开幕/进行中/已落幕,且能查到效益数据/客流/营收/口碑等)→ 正常输出下面 JSON
    - 若是**预进行/启动仪式/政策发布/峰会论坛/招商推介/学术会议/纯商业展会 等非文旅或未落地**内容 → 在 summary 开头明确写"[本条为预进行/非文旅,丢弃]"+ 简短说明,article_url 留空,article_date 留空,publisher 留空。
+   - 若是**主体为酒店广告**(酒店集群/酒店落成/度假酒店开业/酒店项目签约等,主要在讲酒店而不是文旅活动)→ 在 summary 开头明确写"[本条为非文旅(酒店广告),丢弃]"+简短说明,article_url 留空。
+   - **未来时间活动简式**:如果报道的活动开幕/开运日期明确在今天(今天 = {today})之后,不要选这个案例→ summary 开头写"[本条为预进行,丢弃]"。
 1. **必须严格只返回 JSON**(用 ```json ... ``` 包裹),不要任何解释文字
 2. summary 字段:300 字左右一段连续中文(可加标点),**不要换行**(整个 summary 是单行连续文本),不分段、不要 Markdown 标题/加粗/列表;覆盖:项目基本情况(开业时间、所在省/市、核心特色) + 运营模式/产品/营销亮点 + 具体效益数据(接待人数、营收、好评率等)
 3. **article_url 字段**:
@@ -73,6 +75,22 @@ SUMMARY_PROMPT = """⚠️ 必须先调用 web_search 工具拿到关于【{case
    b. 搜索结果页面 title 里常含发布方,例如 "中国新闻网"、"央视新闻" 等
    c. 当报道是政府/事业单位发布时,直接写单位名
    **publisher 必须是具体机构/媒体名称,不要写 "未知"、"网络"、"网页"、URL 域名**
+6. **报道来源过滤(必查)**:article_url 必须是**新闻报道或官方文旅发布渠道**,**严禁使用以下百科类/聚合类/纯介绍类来源**:
+   - 百度百科(baike.baidu.com / baike.baidu.com/item/...)
+   - 搜狗百科(baike.sogou.com)
+   - 维基百科 / 维基百科中文版 / 维基文库 / 维基词典(*.wikipedia.org / zh.wikipedia.org / zh.m.wikipedia.org)
+   - 360 百科(baike.so.com)
+   - 头条百科(baike.baike.com / baike.toutiao.com)
+   - 互动百科(baike.com)
+   - 快懂百科(*.kddlife.com)
+   - 萌娘百科(*.moegirl.org)
+   - 抖音百科(*.douyin.com/qiekjian/ 或 *baike* 路径)
+   - 小红书、抖音、知乎(纯介绍页 / 攻略贴):(www.xiaohongshu.com / www.douyin.com / www.zhihu.com / uke.zhihu.com 等以个人创作者为主的平台,内容偏主观攻略,不适合作为官方文旅案例来源)
+   - 旅游攻略聚合站:mafengwo.cn / www.qyer.com / www.16fan.com / www.dujiyou.com
+   - 大众点评、携程、马蜂窝(景点介绍页):(www.dianping.com / www.ctrip.com / www.meituan.com)
+   **判断方式**:若 article_url 的 host 属于上述名单,或 URL 路径里包含 /item/、/qiekoujian/ 等百科特征,**直接放弃该 URL**(留空字符串),并从其它真实新闻报道里再选一条。
+   **可接受的来源**:各地政府门户网站(wlt.*.gov.cn / *.gov.cn)、新闻网站(新华网 / 人民网 / 中新网 / 央视网 / 光明网 / 中国旅游报 / 各省党报 / 各地新闻网站)、微信公众号推文(mp.weixin.qq.com)、新浪网易搜狐今日头条等大型门户的新闻频道(news.sina.com.cn / www.163.com / news.sohu.com / www.toutiao.com)、微博官方账号(card.weibo.com) 等。
+
    常见类型参考:中央级(新华社、人民日报、央视新闻、央广网、中国新闻网)、行业报(中国旅游报、国际商报、中国文化报)、省级党报(贵州日报、江西日报、安徽日报、长春晚报、珠海特区报)、地方党政(银川市委宣传部、雅安市人民政府)、地方新闻网站(东南网、洛阳网、鲁网、上观新闻、瓯海新闻网)
 5. **article_date** 是该文章发布日期(YYYY-MM-DD),从你看到的报道页面顶部或搜索结果中提取;不知道就留空字符串
 
@@ -81,6 +99,7 @@ SUMMARY_PROMPT = """⚠️ 必须先调用 web_search 工具拿到关于【{case
   "summary": "300 字左右一段话...",
   "publisher": "具体发布方名称(不要写空、不要写网页、不要写域名)",
   "article_date": "YYYY-MM-DD",
+  "event_date": "YYYY-MM-DD",
   "article_url": "https://真实域名/路径/到文章.html"
 }}
 ```

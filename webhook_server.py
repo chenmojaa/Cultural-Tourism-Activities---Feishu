@@ -414,10 +414,26 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 def serve():
     host = config.WEBHOOK_HOST
-    port = config.WEBHOOK_PORT
-    server = HTTPServer((host, port), WebhookHandler)
+    # 同时监听 80 + 13001 两个端口。花生壳 phtunnel.exe 默认把公网流量
+    # 转到 127.0.0.1:80(phtunnel.json 里写死的 forward),花生壳 UI 里的"内网端口"
+    # 和它不一定一致,所以这里额外监听 80,公网域名才能打中。13001 是业务端口,
+    # 保留给局域网/直连调用。
+    listen_ports = sorted({int(config.WEBHOOK_PORT), 80})
+    servers = []
+    for p in listen_ports:
+        try:
+            srv = HTTPServer((host, p), WebhookHandler)
+            servers.append((p, srv))
+        except OSError as e:
+            log.warning(f"[webhook] 端口 {p} 绑定失败(可能被占用或无权限): {e}")
+    if not servers:
+        raise RuntimeError("无可用端口可监听,服务启动失败")
+    for p, srv in servers:
+        t = threading.Thread(target=srv.serve_forever, daemon=True, name=f"webhook-{p}")
+        t.start()
     log.info("=" * 60)
-    log.info(f"Webhook 服务已启动: http://{host}:{port}")
+    ports_str = ", ".join(str(p) for p, _ in servers)
+    log.info(f"Webhook 服务已启动: http://{host} (监听端口: {ports_str})")
     log.info(f"POST {WEBHOOK_PATH}  (接收多维表数据 -> 写 MySQL)")
     log.info(f"POST {WEBHOOK_PATH_FEISHU}  (触发 main 主流程 -> 写飞书 Bitable, 不写 MySQL)")
     log.info(f"GET  {WEBHOOK_PATH}  (触发 LLM 采集,异步)")
@@ -425,10 +441,13 @@ def serve():
     log.info("按 Ctrl+C 停止")
     log.info("=" * 60)
     try:
-        server.serve_forever()
+        import time as _t
+        while True:
+            _t.sleep(3600)
     except KeyboardInterrupt:
         log.info("收到 Ctrl+C,正在停止...")
-        server.shutdown()
+        for _, srv in servers:
+            srv.shutdown()
 
 
 if __name__ == "__main__":

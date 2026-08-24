@@ -55,6 +55,58 @@ def _is_placeholder_url(u):
     return False
 
 
+
+# 黑名单:百科类 / 攻略聚合 / 纯介绍页(用户要求不入飞书)
+# 逻辑同 _is_placeholder_url:URL host 或路径命中关键词就丢弃
+_BLOCKED_NEWS_DOMAINS = (
+    # 百科类
+    "baike.baidu.com",
+    "baike.sogou.com",
+    "baike.so.com",
+    "baike.baike.com",
+    "baike.toutiao.com",
+    "baike.com",
+    "wikipedia.org",
+    "zh.wikipedia.org",
+    "en.wikipedia.org",
+    "baike.moegirl.org",
+    "baike.kddlife.com",
+    # 攻略聚合 / 景点介绍(非新闻报道)
+    "www.xiaohongshu.com",
+    "www.douyin.com",
+    "www.zhihu.com",
+    "uke.zhihu.com",
+    "www.mafengwo.cn",
+    "www.qyer.com",
+    "www.16fan.com",
+    "www.dujiyou.com",
+    "www.dianping.com",
+    "www.ctrip.com",
+    "www.meituan.com",
+)
+
+_BLOCKED_URL_PATH_KEYWORDS = (
+    "/item/",        # 百科条目路径特征
+    "/qiekoujian/",  # 抖音百科条目路径
+    "/baike/",       # 通用百科路径
+)
+
+def _is_blocked_news_url(u):
+    """检测 URL 是否指向百科/攻略聚合/纯介绍页(非新闻报道)。命中就丢弃。
+
+    返回 True 即丢弃。
+    """
+    if not u:
+        return False
+    u_low = u.lower()
+    for dom in _BLOCKED_NEWS_DOMAINS:
+        if (dom + "/" in u_low) or u_low.endswith(dom) or ("/" + dom + "/") in u_low:
+            return True
+    for kw in _BLOCKED_URL_PATH_KEYWORDS:
+        if kw in u_low:
+            return True
+    return False
+
 # ============================================================
 # 业务规则:案例后过滤
 # ============================================================
@@ -69,6 +121,57 @@ def _extract_number(s: str):
     if m.group(2):
         n *= 10000
     return n
+
+
+# 文旅关键词(主体是酒店/纯招商/纯楼盘推广就视为非文旅)
+_NON_TOURISM_KEYWORDS = (
+    "酒店集群", "酒店开业", "酒店开业仪式", "度假酒店", "酒店项目",
+    "酒店落成", "酒店签约", "酒店管理", "酒店集团",
+)
+
+_NON_TOURISM_PATH_KEYWORDS = (
+    "本条为预进行", "本条为非文旅", "本条非文旅",
+)
+
+
+def _is_invalid_summary(s):
+    """判断 summary 是否属于应当丢弃的预进行/非文旅/酒店广告类内容。
+
+    返回 (is_invalid, reason)。
+    """
+    s = (s or "").strip()
+    if not s:
+        return False, ""
+    head = s[:400]
+    # ① LLM 在 summary 开头主动标记为预进行/非文旅
+    for kw in _NON_TOURISM_PATH_KEYWORDS:
+        if head.startswith(kw) or ("[" + kw) in head[:120]:
+            return True, "预进行/非文旅(" + kw + ")"
+    # ② 主体是酒店广告(关键词出现在 summary 开头 400 字内)
+    for kw in _NON_TOURISM_KEYWORDS:
+        if kw in head:
+            return True, "酒店广告(" + kw + ")"
+    return False, ""
+
+
+def _is_future_event_date(d, today=None):
+    """判断 event_date 是否在未来(开张日 > 今天)。返回 (is_future, parsed_date or None)。"""
+    d = (d or "").strip()
+    if not d:
+        return False, None
+    parsed = None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日"):
+        try:
+            parsed = datetime.strptime(d[:10], fmt)
+            break
+        except Exception:
+            continue
+    if parsed is None:
+        return False, None
+    today = today or datetime.now()
+    if parsed.date() > today.date():
+        return True, parsed
+    return False, parsed
 
 
 def post_filter(case: dict) -> tuple:
@@ -213,7 +316,10 @@ def step2_summary(llm: LLMClient, case: dict) -> dict:
     """让 LLM 联网搜索后写 300 字 summary。URL 优先用 LLM 调用返回的 search_info.search_results[0] (来自搜索引擎,真实可靠)。"""
     name = case["name"]
     log.info(f"步骤 2:为 [{name}] 联网搜索 + 写 300 字总结")
-    prompt = SUMMARY_PROMPT.format(case_name=name)
+    prompt = SUMMARY_PROMPT.format(
+        case_name=name,
+        today=datetime.now().strftime('%Y-%m-%d'),
+    )
     try:
         raw = llm.chat(
             SYSTEM_PROMPT, prompt,
@@ -268,6 +374,7 @@ def step2_summary(llm: LLMClient, case: dict) -> dict:
             # publisher 优先级:LLM 给的(最准) > 搜索引擎 site_name (备选) > 空
             "publisher": llm_publisher or search_site,
             "article_date": (obj.get("article_date") or "").strip(),
+            "event_date": (obj.get("event_date") or "").strip(),
         }
     log.warning(f"[{name}] LLM 未返回 JSON,兜底从纯文本提 URL")
     urls = extract_all_reference_urls(raw)
@@ -276,6 +383,7 @@ def step2_summary(llm: LLMClient, case: dict) -> dict:
         "article_url": search_url or (urls[0][1] if urls else "").strip(),
         "publisher": search_site,
         "article_date": "",
+        "event_date": "",
     }
 
 
@@ -406,6 +514,19 @@ def _process_one_case(llm: LLMClient, case: dict, idx: int, total: int):
         log.warning(f"案例 [{name}] summary 为空,丢弃")
         return None
 
+    # 新规则 ①+②:summary 开头标记预进行/非文旅,或主体是酒店广告,直接丢弃
+    invalid, reason = _is_invalid_summary(summary)
+    if invalid:
+        log.warning(f"案例 [{name}] {reason},丢弃")
+        return None
+
+    # 新规则 ③:活动实际开张日期在未来,丢弃(LLM 步骤 2 输出的 event_date 优先,否则用 case.open_date)
+    event_date_str = res.get("event_date", "") or case.get("open_date", "") or case.get("event_date", "")
+    is_future, _ = _is_future_event_date(event_date_str)
+    if is_future:
+        log.warning(f"案例 [{name}] 活动开张日 {event_date_str} 在未来,丢弃")
+        return None
+
     # URL 兜底顺序(前面任一拿到就停):
     # URL 只取 LLM 联网搜索的真结果(对应响应中 [1][2] 角标),不采纳 step1 推荐时
     # LLM 自己编造的 article_url — 那种是 LLM 凭训练数据编的,典型 404。
@@ -424,6 +545,10 @@ def _process_one_case(llm: LLMClient, case: dict, idx: int, total: int):
             f"summary_含 URL={bool(extract_all_reference_urls(summary))}"
         )
         log.warning(f"案例 [{name}] 无可用 URL(LLM 未触发联网/无角标),丢弃")
+        return None
+    # 黑名单兜底:百科/攻略聚合/纯介绍页(用户要求不入飞书)
+    if _is_blocked_news_url(ref_url):
+        log.warning(f'案例 [{name}] URL 命中百科/攻略黑名单,丢弃: {ref_url[:80]}')
         return None
     # URL 实测:过滤 LLM 编造的假 URL(典型: gz.gov.cn/.../2026/.../*.html 404)
     if config.VALIDATE_URLS:
