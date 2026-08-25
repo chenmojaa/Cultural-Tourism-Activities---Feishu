@@ -2,11 +2,10 @@
 import logging
 from typing import Any, List, Optional
 
-import dashscope
-from openai import OpenAI
+import requests
 
 import config
-from utils import retry
+from app.utils.tools import retry
 
 log = logging.getLogger("wenglu")
 
@@ -51,7 +50,6 @@ class LLMClient:
                 "未设置 QWEN_API_KEY。请在 config.py 中填写,"
                 '或执行: ="sk-xxx"'
             )
-        dashscope.api_key = key
         self.model = config.QWEN_MODEL
         self.use_responses_api = _model_needs_responses_api(self.model)
         # 两个路径独立判断(不互斥):原生 API 优先走,失败后跳 Responses API
@@ -68,7 +66,7 @@ class LLMClient:
                     native_base = "https://dashscope-intl.aliyuncs.com/api/v1"
                 else:
                     native_base = "https://dashscope.aliyuncs.com/api/v1"
-            dashscope.base_http_api_url = native_base
+            self._native_base = native_base
             log.info(f"[native API] base = {native_base}")
 
         # 仅百炼官方 API 支持搜索;本地服务不支持
@@ -137,45 +135,52 @@ class LLMClient:
         self, system: str, user: str, temperature: float,
         max_tokens: int, do_search: bool,
     ) -> str:
-        client = OpenAI(
-            api_key=config.QWEN_API_KEY,
-            base_url=config.QWEN_BASE_URL,
-        )
+        # 纯 HTTP,无 SDK:POST {QWEN_BASE_URL}/responses
         # Responses API 用 input 而不是 messages;role 仍为 system/user
         input_msgs = []
         if system:
             input_msgs.append({"role": "system", "content": system})
         input_msgs.append({"role": "user", "content": user})
 
-        kwargs = dict(
-            model=self.model,
-            input=input_msgs,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        )
+        body = {
+            "model": self.model,
+            "input": input_msgs,
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
         if do_search:
             # 关键:内置 web_search 工具;百炼会在 output 里返回 web_search_call
             # (含 action.sources)和 message.content[].annotations(角标)
             # 注:tool_choice="required" 会被百炼 thinking mode 拒绝(仅提示 LLM 调用,不能强制)
-            kwargs["tools"] = [{"type": "web_search"}]
+            body["tools"] = [{"type": "web_search"}]
             log.debug(f"[{self.model}] Responses API 启用 web_search 工具")
 
+        url = config.QWEN_BASE_URL.rstrip("/") + "/responses"
+        headers = {
+            "Authorization": f"Bearer {config.QWEN_API_KEY}",
+            "Content-Type": "application/json",
+        }
         try:
-            # 给 web_search + reasoning 充足的时间,避免 60s 默认超时被砍
-            resp = client.responses.create(**kwargs, timeout=300.0)  # 5min, web_search + reasoning 需要充足时间
-        except Exception as e:
-            # OpenAI 异常:把模型 + 关键 body 提一下,方便排查
+            # 给 web_search + reasoning 充足时间(5min),避免 60s 默认超时被砍
+            r = requests.post(url, headers=headers, json=body, timeout=300.0)
+            r.raise_for_status()
+            data = r.json()
+        except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Responses API 调用失败 [{self.model}]: {type(e).__name__}: {e}"
             ) from e
+        except ValueError as e:
+            raise RuntimeError(
+                f"Responses API 响应解析失败 [{self.model}]: {r.text[:300]}"
+            ) from e
 
-        # 缓存完整响应,get_last_search_results 读 annotations/sources
-        self.last_response = resp
-        text = _extract_text_from_responses(resp)
+        # 缓存完整响应(dict),get_last_search_results 读 annotations/sources
+        self.last_response = data
+        text = _extract_text_from_responses(data)
         if not text:
             # 调试用:打一段输出结构
             try:
-                preview = str(resp)[:600]
+                preview = str(data)[:600]
             except Exception:
                 preview = "<unrepr>"
             raise RuntimeError(
@@ -195,46 +200,52 @@ class LLMClient:
         self, system: str, user: str, temperature: float,
         max_tokens: int, do_search: bool,
     ) -> str:
-        client = OpenAI(
-            api_key=config.QWEN_API_KEY,
-            base_url=config.QWEN_BASE_URL,
-        )
+        # 纯 HTTP,无 SDK:POST {QWEN_BASE_URL}/chat/completions
+        # 百炼兼容模式把 enable_search / search_options 放在顶层
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": user})
 
-        kwargs = dict(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
         if do_search:
             # 严格按百炼官方示例:只传 forced_search=True
             # 多传 enable_source/enable_citation 会让 LLM 模仿百炼内部搜索格式 返 [{"query":...}],而不是真推荐 case
-            kwargs["extra_body"] = {
-                "enable_search": True,
-                "search_options": {
-                    "forced_search": True,
-                },
-            }
+            body["enable_search"] = True
+            body["search_options"] = {"forced_search": True}
             log.debug(f"[{self.model}] Chat Completions 启用 forced_search=True(精简)")
 
+        url = config.QWEN_BASE_URL.rstrip("/") + "/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {config.QWEN_API_KEY}",
+            "Content-Type": "application/json",
+        }
         try:
-            resp = client.chat.completions.create(**kwargs, timeout=300.0)
-        except Exception as e:
+            r = requests.post(url, headers=headers, json=body, timeout=300.0)
+            r.raise_for_status()
+            data = r.json()
+        except requests.exceptions.RequestException as e:
             raise RuntimeError(
                 f"Chat Completions 调用失败 [{self.model}]: {type(e).__name__}: {e}"
             ) from e
+        except ValueError as e:
+            raise RuntimeError(
+                f"Chat Completions 响应解析失败 [{self.model}]: {r.text[:300]}"
+            ) from e
 
-        self.last_response = resp
-        if not resp.choices:
+        self.last_response = data
+        choices = data.get("choices") or []
+        if not choices:
             raise RuntimeError(f"Chat Completions 返回空 choices [model={self.model}]")
-        text = resp.choices[0].message.content or ""
-        if not text:
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if not content:
             raise RuntimeError(f"Chat Completions 返回空文本 [model={self.model}]")
-        return text
+        return content
 
     # ----------------------------------------------------------------
     # 路径 2:DashScope 原生 API
@@ -246,23 +257,23 @@ class LLMClient:
         self, system: str, user: str, temperature: float,
         max_tokens: int, do_search: bool,
     ) -> str:
+        # Python 3.7 兼容:不依赖 dashscope SDK,直接调 DashScope HTTP 接口
+        # 端点: POST {base}/services/aigc/text-generation/generation
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": user})
 
-        params = dict(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            result_format="message",
-        )
+        parameters = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "result_format": "message",
+        }
         if do_search:
             # 关键:开启联网 + 真实搜索结果 + 角标标注
-            params["enable_search"] = True
+            parameters["enable_search"] = True
             # forced_search=True 强制模型每次都调联网搜索(否则模型可能凭印象编)
-            params["search_options"] = {
+            parameters["search_options"] = {
                 "enable_source": True,            # 返回 search_info.search_results
                 "enable_citation": True,          # 回复里带 [ref_N] 角标
                 "citation_format": "[ref_<number>]",  # 角标样式更易读
@@ -270,16 +281,44 @@ class LLMClient:
             }
             log.debug(f"[{self.model}] DashScope 原生 API 启用联网搜索 (forced_search + enable_source + enable_citation)")
 
-        resp = dashscope.Generation.call(**params)
-        # 缓存完整响应,供 step2_summary 读 search_info
-        self.last_response = resp
-
-        if getattr(resp, "status_code", 0) != 200:
+        url = f"{self._native_base.rstrip('/')}/services/aigc/text-generation/generation"
+        headers = {
+            "Authorization": f"Bearer {config.QWEN_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        body = {"model": self.model, "input": {"messages": messages}, "parameters": parameters}
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=300.0)
+        except requests.exceptions.RequestException as e:
             raise RuntimeError(
-                f"DashScope API error [{self.model}]: code={getattr(resp, 'code', '?')} "
-                f"msg={getattr(resp, 'message', '?')}"
+                f"DashScope HTTP 调用失败 [{self.model}]: {type(e).__name__}: {e}"
+            ) from e
+
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise RuntimeError(
+                f"DashScope 响应解析失败 [{self.model}]: status={r.status_code} body={r.text[:300]}"
+            ) from e
+
+        # DashScope 业务错误用顶层 code 字段(HTTP 仍为 200)
+        if data.get("code"):
+            raise RuntimeError(
+                f"DashScope API error [{self.model}]: code={data.get('code')} "
+                f"msg={data.get('message')}"
             )
-        return resp.output.choices[0].message.content or ""
+
+        # 缓存完整响应(dict),供 step2_summary 读 search_info
+        self.last_response = data
+
+        output = data.get("output") or {}
+        choices = output.get("choices") or []
+        if not choices:
+            raise RuntimeError(
+                f"DashScope 返回空 choices [model={self.model}], body={str(data)[:300]}"
+            )
+        content = (choices[0].get("message") or {}).get("content") or ""
+        return content
 
     def web_search_called(self) -> bool:
         """检测上一次 chat() 调用 LLM 是否真调了 web_search 工具。
@@ -290,7 +329,11 @@ class LLMClient:
         """
         if not self.last_response:
             return False
-        out = getattr(self.last_response, "output", None)
+        out = (
+            self.last_response.get("output")
+            if isinstance(self.last_response, dict)
+            else getattr(self.last_response, "output", None)
+        )
         if not out:
             return False
         for item in out:
@@ -346,13 +389,23 @@ class LLMClient:
             if results:
                 return results
 
-        # 2) 回退:原生 API(dashscope.Generation.call)的 search_info
+        # 2) 回退:原生 API(DashScope HTTP 直调)的 search_info
         try:
-            output = getattr(self.last_response, "output", None)
+            resp_obj = self.last_response
+            output = (
+                resp_obj.get("output")
+                if isinstance(resp_obj, dict)
+                else getattr(resp_obj, "output", None)
+            )
             if output is not None:
-                info = getattr(output, "search_info", None) or {}
-                for r in info.get("search_results") or []:
-                    results.append(r)
+                info = (
+                    output.get("search_info")
+                    if isinstance(output, dict)
+                    else getattr(output, "search_info", None)
+                ) or {}
+                if isinstance(info, dict):
+                    for r in info.get("search_results") or []:
+                        results.append(r)
         except Exception:
             pass
         return results
@@ -382,3 +435,4 @@ def _extract_text_from_responses(resp) -> str:
                     if txt:
                         parts.append(txt)
     return "\n".join(parts).strip()
+        # 2) 回退:原生 API(DashScope HTTP 直调)的 search_info

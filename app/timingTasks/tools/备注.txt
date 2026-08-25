@@ -1,0 +1,3 @@
+wenlv_case.py
+注释：LLM 联网搜索文旅案例 -> URL/摘要查重 -> 写入飞书多维表格或 MySQL
+入口：run_to_feishu / run_to_mysql / wenlv_to_feishu_main / wenlv_to_mysql_main
